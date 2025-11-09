@@ -1,11 +1,26 @@
-use std::{error::Error, sync::mpsc};
+use std::{
+    error::Error,
+    sync::{mpsc, OnceLock},
+};
 
 use airplay::playback::video::{PacketKind, VideoPacket, VideoParams};
+use crate::ui::{FrameSink, VideoFrame};
 use gstreamer::{
-    Buffer, Caps, Element, ElementFactory, Format, MessageType, MessageView, Pipeline, State,
-    event::Eos, glib::GString, prelude::*,
+    Buffer, Caps, Element, ElementFactory, FlowError, FlowSuccess, Format, MessageType,
+    MessageView, Pipeline, State, event::Eos, glib::GString, prelude::*,
 };
-use gstreamer_app::AppSrc;
+use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
+use gstreamer_video::{VideoInfo, VideoMeta};
+
+static VIDEO_SINK: OnceLock<FrameSink> = OnceLock::new();
+
+pub fn register_frame_sink(sink: FrameSink) {
+    let _ = VIDEO_SINK.set(sink);
+}
+
+fn frame_sink() -> Option<FrameSink> {
+    VIDEO_SINK.get().cloned()
+}
 
 pub fn transcode(
     id: u64,
@@ -76,29 +91,110 @@ pub fn transcode(
     }
 }
 
-fn build_passthrough_pipeline(
+fn build_display_pipeline(
     pipeline: &Pipeline,
-    appsrc: &Element,
-    parser: &str,
-    file_location: &str,
-) -> Result<(), Box<dyn Error>> {
-    let ingest_parse = ElementFactory::make(parser).build()?;
-    let muxer = ElementFactory::make("mp4mux").build()?;
-    let sink = ElementFactory::make("filesink")
-        .property("location", file_location)
+    appsrc: &AppSrc,
+    spec: &CodecPipelineSpec,
+    frame_sink: FrameSink,
+) -> Result<AppSink, Box<dyn Error>> {
+    let parser = ElementFactory::make(spec.parser).build()?;
+    let decoder = ElementFactory::make(spec.decoder).build()?;
+    let convert = ElementFactory::make("videoconvert").build()?;
+    let scale = ElementFactory::make("videoscale").build()?;
+    let video_caps = Caps::builder("video/x-raw")
+        .field("format", "BGRA")
+        .build();
+    let capsfilter = ElementFactory::make("capsfilter")
+        .property("caps", &video_caps)
         .build()?;
+    let video_caps = Caps::builder("video/x-raw")
+        .field("format", "BGRA")
+        .build();
+    let appsink = AppSink::builder()
+        .caps(&video_caps)
+        .max_buffers(1)
+        .drop(true)
+        .build();
 
-    pipeline.add_many([appsrc, &ingest_parse, &muxer, &sink])?;
-    Element::link_many([appsrc, &ingest_parse, &muxer, &sink])?;
+    let dispatcher = frame_sink.clone();
+    appsink.set_callbacks(
+        AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| FlowError::Eos)?;
+                let buffer = sample.buffer().ok_or(FlowError::Error)?;
+                let caps = sample.caps().ok_or(FlowError::Error)?;
+                let info = VideoInfo::from_caps(&caps).map_err(|_| FlowError::Error)?;
+                let width = info.width() as u32;
+                let height = info.height() as u32;
 
-    Ok(())
+                let stride = buffer
+                    .meta::<VideoMeta>()
+                    .map(|meta| meta.stride()[0] as usize)
+                    .unwrap_or_else(|| info.stride()[0] as usize);
+                let row_len = (width as usize) * 4;
+                let total = row_len * (height as usize);
+
+                let map = buffer.map_readable().map_err(|_| FlowError::Error)?;
+                let src = map.as_slice();
+                let required = stride * (height as usize);
+                if stride == row_len && src.len() >= total {
+                    dispatcher.send(VideoFrame {
+                        width,
+                        height,
+                        data: src[..total].to_vec(),
+                    });
+                } else if stride >= row_len && src.len() >= required {
+                    let mut data = vec![0u8; total];
+                    for row in 0..height as usize {
+                        let src_offset = row * stride;
+                        let dst_offset = row * row_len;
+                        data[dst_offset..dst_offset + row_len]
+                            .copy_from_slice(&src[src_offset..src_offset + row_len]);
+                    }
+                    dispatcher.send(VideoFrame { width, height, data });
+                } else {
+                    return Err(FlowError::Error);
+                }
+
+                Ok(FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    let appsrc_element = appsrc.upcast_ref::<Element>();
+    let parser_element = parser.upcast_ref::<Element>();
+    let decoder_element = decoder.upcast_ref::<Element>();
+    let convert_element = convert.upcast_ref::<Element>();
+    let scale_element = scale.upcast_ref::<Element>();
+    let capsfilter_element = capsfilter.upcast_ref::<Element>();
+    let appsink_element = appsink.upcast_ref::<Element>();
+
+    pipeline.add_many([
+        appsrc_element,
+        parser_element,
+        decoder_element,
+        convert_element,
+        scale_element,
+        capsfilter_element,
+        appsink_element,
+    ])?;
+
+    Element::link_many([
+        appsrc_element,
+        parser_element,
+        decoder_element,
+        convert_element,
+        scale_element,
+        capsfilter_element,
+        appsink_element,
+    ])?;
+
+    Ok(appsink)
 }
 
 fn detect_codec(avcc: &[u8]) -> VideoCodec {
-    let avcc_ref = avcc.as_ref();
-
-    if avcc_ref.len() >= 8 {
-        return match &avcc_ref[4..8] {
+    if avcc.len() >= 8 {
+        return match &avcc[4..8] {
             b"hvc1" => {
                 VideoCodec::H265
             }
@@ -214,17 +310,24 @@ fn create_stream(
         .do_timestamp(true)
         .build();
 
-    let file_location = format!("video_{id}.mp4");
-    build_passthrough_pipeline(&pipeline, appsrc.upcast_ref(), spec.parser, &file_location)?;
+    let Some(frame_sink) = frame_sink() else {
+        return Err("video frame sink not initialized".into());
+    };
+    let appsink = build_display_pipeline(&pipeline, &appsrc, &spec, frame_sink)?;
 
     pipeline.set_state(State::Playing)?;
 
-    Ok(Context { pipeline, appsrc })
+    Ok(Context {
+        pipeline,
+        appsrc,
+        _appsink: appsink,
+    })
 }
 
 struct Context {
     pipeline: Pipeline,
     appsrc: AppSrc,
+    _appsink: AppSink,
 }
 
 impl Drop for Context {
@@ -246,6 +349,7 @@ struct CodecPipelineSpec {
     caps_mime: &'static str,
     stream_format: &'static str,
     parser: &'static str,
+    decoder: &'static str,
 }
 
 impl CodecPipelineSpec {
@@ -255,11 +359,13 @@ impl CodecPipelineSpec {
                 caps_mime: "video/x-h265",
                 stream_format: "hvc1",
                 parser: "h265parse",
+                decoder: "vtdec_hw",
             },
             _ => Self {
                 caps_mime: "video/x-h264",
                 stream_format: "avc",
                 parser: "h264parse",
+                decoder: "vtdec_hw",
             },
         }
     }

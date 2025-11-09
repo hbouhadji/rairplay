@@ -2,7 +2,12 @@
 
 use bytes::Bytes;
 use macaddr::MacAddr6;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, Deserializer},
+    ser::{SerializeStruct, Serializer},
+    Deserialize, Serialize,
+};
+use serde_json::Value;
 
 pub struct StreamId;
 
@@ -93,15 +98,39 @@ pub enum TimingProtocol {
     },
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "type")]
 pub enum StreamRequest {
-    #[serde(rename = 96)]
     AudioRealtime(AudioRealtimeRequest),
-    #[serde(rename = 103)]
     AudioBuffered(AudioBufferedRequest),
-    #[serde(rename = 110)]
     Video(VideoRequest),
+}
+
+impl<'de> Deserialize<'de> for StreamRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct TaggedStream {
+            #[serde(rename = "type")]
+            tag: u32,
+            #[serde(flatten)]
+            payload: Value,
+        }
+
+        let tagged = TaggedStream::deserialize(deserializer)?;
+        match tagged.tag {
+            t if t == StreamId::AUDIO_REALTIME => serde_json::from_value(tagged.payload)
+                .map(StreamRequest::AudioRealtime)
+                .map_err(de::Error::custom),
+            t if t == StreamId::AUDIO_BUFFERED => serde_json::from_value(tagged.payload)
+                .map(StreamRequest::AudioBuffered)
+                .map_err(de::Error::custom),
+            t if t == StreamId::VIDEO => serde_json::from_value(tagged.payload)
+                .map(StreamRequest::Video)
+                .map_err(de::Error::custom),
+            other => Err(de::Error::custom(format!("unknown stream type {other}"))),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -164,34 +193,65 @@ pub enum SetupResponse {
     },
 }
 
-#[derive(Serialize)]
-#[serde(tag = "type")]
 pub enum StreamResponse {
-    #[serde(rename = 96)]
     AudioRealtime {
-        #[serde(rename = "streamID")]
         id: u64,
-        #[serde(rename = "dataPort")]
         local_data_port: u16,
-        #[serde(rename = "controlPort")]
         local_control_port: u16,
     },
-    #[serde(rename = 103)]
     AudioBuffered {
-        #[serde(rename = "streamID")]
         id: u64,
-        #[serde(rename = "dataPort")]
         local_data_port: u16,
-        #[serde(rename = "audioBufferSize")]
         audio_buffer_size: u32,
     },
-    #[serde(rename = 110)]
     Video {
-        #[serde(rename = "streamID")]
         id: u64,
-        #[serde(rename = "dataPort")]
         local_data_port: u16,
     },
+}
+
+impl Serialize for StreamResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            StreamResponse::AudioRealtime {
+                id,
+                local_data_port,
+                local_control_port,
+            } => {
+                let mut state = serializer.serialize_struct("StreamResponse", 4)?;
+                state.serialize_field("type", &StreamId::AUDIO_REALTIME)?;
+                state.serialize_field("streamID", id)?;
+                state.serialize_field("dataPort", local_data_port)?;
+                state.serialize_field("controlPort", local_control_port)?;
+                state.end()
+            }
+            StreamResponse::AudioBuffered {
+                id,
+                local_data_port,
+                audio_buffer_size,
+            } => {
+                let mut state = serializer.serialize_struct("StreamResponse", 4)?;
+                state.serialize_field("type", &StreamId::AUDIO_BUFFERED)?;
+                state.serialize_field("streamID", id)?;
+                state.serialize_field("dataPort", local_data_port)?;
+                state.serialize_field("audioBufferSize", audio_buffer_size)?;
+                state.end()
+            }
+            StreamResponse::Video {
+                id,
+                local_data_port,
+            } => {
+                let mut state = serializer.serialize_struct("StreamResponse", 3)?;
+                state.serialize_field("type", &StreamId::VIDEO)?;
+                state.serialize_field("streamID", id)?;
+                state.serialize_field("dataPort", local_data_port)?;
+                state.end()
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]

@@ -26,3 +26,8 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 clap = { version = "4.5.39", features = ["derive"] }
 gstreamer = "0.23.6"
 gstreamer-app = "0.23.5"
+gstreamer-video = "0.23.6"
+gpui = "0.2.1"
+async-channel = "2.3.1"
+image = "0.25.1"
+smallvec = "1.13.2"
