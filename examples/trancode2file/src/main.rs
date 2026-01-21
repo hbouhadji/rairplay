@@ -36,7 +36,7 @@ async fn main() {
 
     discovery::mdns_broadcast(config.as_ref());
 
-    let tcp_listener = TcpListener::bind("0.0.0.0:5200").await.unwrap();
+    let tcp_listener = TcpListener::bind("[::]:5200").await.unwrap();
     axum::serve(
         transport::RtspListener { tcp_listener },
         airplay::rtsp::RtspService { config },
