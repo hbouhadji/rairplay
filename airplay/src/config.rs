@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bitflags::bitflags;
 use derivative::Derivative;
@@ -21,7 +21,7 @@ pub struct Config<ADev, VDev> {
     pub pairing: Pairing,
     /// Address for binding opened streams.
     /// By default they're binded to all interfaces (i.e. the address if `0.0.0.0`)
-    #[derivative(Default(value = "IpAddr::from(Ipv4Addr::UNSPECIFIED)"))]
+    #[derivative(Default(value = "IpAddr::from(Ipv6Addr::UNSPECIFIED)"))]
     pub bind_addr: IpAddr,
     pub audio: Audio<ADev>,
     pub video: Video<VDev>,
