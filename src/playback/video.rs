@@ -36,6 +36,7 @@ pub enum PacketKind {
     Payload,
     /// Auxiliary plist payload.
     Plist,
+    Suspend,
     /// Unknown packet kind.
     Other(u16),
 }
