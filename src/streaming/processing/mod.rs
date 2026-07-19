@@ -13,7 +13,7 @@ use crate::{
     pairing::SessionKey,
     playback::{
         audio::{AudioPacket, AudioStream},
-        video::{PacketKind, VideoPacket, VideoStream},
+        video::{PacketKind, VideoPacket, VideoStream, VideoStreamEvent},
     },
 };
 
@@ -182,6 +182,7 @@ pub async fn video_processor(
 ) -> io::Result<()> {
     let mut video_buf = memory::BytesHunk::new(video_buf_size as usize);
     let mut cipher = build_video_cipher(&encryption);
+    let mut stream_suspended = false;
 
     loop {
         async {
@@ -192,7 +193,8 @@ pub async fn video_processor(
             let payload_len = ptr.get_u32_le();
             let mut payload = video_buf.allocate_buf(payload_len as usize);
             tcp_stream.read_exact(&mut payload).await?;
-            let kind = match ptr.get_u16_le() {
+            let packet_type = ptr.get_u16_le();
+            let kind = match packet_type {
                 1 => {
                     if payload.len() >= 8 && &payload[4..8] == b"hvc1" {
                         PacketKind::Hvc1
@@ -204,15 +206,25 @@ pub async fn video_processor(
                 5 => PacketKind::Plist,
                 other => PacketKind::Other(other),
             };
-            let unknown_field = ptr.get_u16_le();
+            let stream_option = ptr.get_u16_le();
             let timestamp = ptr.get_u64_le();
+            let stream_event =
+                video_stream_event(&mut stream_suspended, packet_type, stream_option);
 
             let mut pkt = VideoPacket {
                 kind,
+                stream_event,
                 timestamp,
                 payload,
             };
-            tracing::trace!(?kind, %timestamp, unknown=%unknown_field, %payload_len, "packet read");
+            tracing::trace!(
+                ?kind,
+                ?stream_event,
+                %timestamp,
+                option = format_args!("{stream_option:#06x}"),
+                %payload_len,
+                "packet read"
+            );
 
             // Only payload need to be decrypted
             // TODO: Other(_) too?
@@ -231,6 +243,65 @@ pub async fn video_processor(
         }
         .instrument(tracing::debug_span!("packet.video"))
         .await?;
+    }
+}
+
+fn video_stream_event(
+    suspended: &mut bool,
+    packet_type: u16,
+    stream_option: u16,
+) -> Option<VideoStreamEvent> {
+    if packet_type != 1 {
+        return None;
+    }
+
+    match (*suspended, stream_option) {
+        (false, 0x0156 | 0x015e) => {
+            *suspended = true;
+            Some(VideoStreamEvent::Suspend)
+        }
+        (true, 0x0116 | 0x011e) => {
+            *suspended = false;
+            Some(VideoStreamEvent::Resume)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod video_tests {
+    use crate::playback::video::VideoStreamEvent;
+
+    use super::video_stream_event;
+
+    #[test]
+    fn emits_only_video_stream_state_transitions() {
+        let mut suspended = false;
+
+        assert_eq!(video_stream_event(&mut suspended, 1, 0x0116), None);
+        assert!(!suspended);
+
+        assert_eq!(
+            video_stream_event(&mut suspended, 1, 0x0156),
+            Some(VideoStreamEvent::Suspend)
+        );
+        assert!(suspended);
+        assert_eq!(video_stream_event(&mut suspended, 1, 0x015e), None);
+        assert!(suspended);
+
+        assert_eq!(
+            video_stream_event(&mut suspended, 1, 0x011e),
+            Some(VideoStreamEvent::Resume)
+        );
+        assert!(!suspended);
+    }
+
+    #[test]
+    fn ignores_stream_options_on_non_codec_packets() {
+        let mut suspended = false;
+
+        assert_eq!(video_stream_event(&mut suspended, 0, 0x0156), None);
+        assert!(!suspended);
     }
 }
 

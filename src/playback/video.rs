@@ -19,10 +19,21 @@ pub struct VideoParams {}
 pub struct VideoPacket {
     /// Packet classification.
     pub kind: PacketKind,
+    /// Stream lifecycle transition carried by this packet, if any.
+    pub stream_event: Option<VideoStreamEvent>,
     /// Stream timestamp associated with the packet.
     pub timestamp: u64,
     /// Packet payload bytes.
     pub payload: BytesMut,
+}
+
+/// A video stream lifecycle transition announced by the sender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoStreamEvent {
+    /// Temporarily stop rendering while keeping the transport alive.
+    Suspend,
+    /// Resume rendering after a suspension.
+    Resume,
 }
 
 /// Kind of video payload delivered to the backend.
