@@ -56,7 +56,7 @@ use airplay::{
     playback::{
         audio::{AudioPacket, AudioParams},
         null::NullDevice,
-        video::{VideoPacket, VideoParams},
+        video::{VideoParams, VideoStreamMessage},
     },
     transport::DualStackListenerWithRtspRemap,
 };
@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
         video: airplay::config::Video {
-            device: NullDevice::<VideoParams, VideoPacket>::default(),
+            device: NullDevice::<VideoParams, VideoStreamMessage>::default(),
             ..Default::default()
         },
         ..Default::default()
@@ -85,6 +85,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## Video stream messages
+
+Data and lifecycle control are deliberately distinct:
+
+```rust
+use rairplay::playback::video::{VideoStreamEvent, VideoStreamMessage};
+
+match message {
+    VideoStreamMessage::Packet(packet) => handle_packet(packet),
+    VideoStreamMessage::Event(VideoStreamEvent::Suspend) => suspend(),
+    VideoStreamMessage::Event(VideoStreamEvent::Resume) => resume(),
+    _ => {}
+}
+```
+
+The wildcard arm is required so future packet kinds and lifecycle events can
+be added without another breaking API change.
 
 The null devices are useful for bring-up and protocol testing because they accept streams and discard payloads while still exercising pairing and session setup.
 

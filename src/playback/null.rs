@@ -5,7 +5,7 @@ use std::{
 use super::{
     ChannelHandle, Device, Stream,
     audio::{AudioDevice, AudioPacket, AudioParams},
-    video::{VideoDevice, VideoPacket, VideoParams},
+    video::{VideoDevice, VideoParams, VideoStreamMessage},
 };
 
 pub struct NullDevice<Params, Content>(PhantomData<(Params, Content)>);
@@ -50,7 +50,7 @@ impl AudioDevice for NullDevice<AudioParams, AudioPacket> {
     }
 }
 
-impl VideoDevice for NullDevice<VideoParams, VideoPacket> {}
+impl VideoDevice for NullDevice<VideoParams, VideoStreamMessage> {}
 
 pub struct NullStream<C>(PhantomData<C>);
 
